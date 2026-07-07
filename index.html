@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Organs Overlay — ml5 v1 BodyPose</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+  <style>
+    :root{
+      --bg:#0b0b10; --panel:#14141d; --ink:#e6e6ef; --mut:#9aa0a6; --acc:#4f8cff; --ok:#22c55e; --off:#ef4444;
+      --pad:12px; --rad:12px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,Arial}
+    header{
+      position:fixed; inset:0 0 auto 0; height:56px; display:flex; align-items:center; gap:12px;
+      padding:0 14px; background:linear-gradient(180deg,#0b0b10,rgba(11,11,16,.7)); z-index:10; border-bottom:1px solid #1f2230;
+    }
+    header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.2px}
+    header .hint{color:var(--mut); font-size:12px}
+    main{height:100%; display:grid; grid-template-columns:280px 1fr; gap:0; padding-top:56px}
+    aside{
+      background:var(--panel); border-right:1px solid #1f2230; padding:16px; position:relative;
+    }
+    .group{margin-bottom:18px}
+    .group h2{margin:0 0 10px 0; font-size:12px; text-transform:uppercase; color:var(--mut); letter-spacing:.6px}
+    .btn{
+      width:100%; margin:6px 0; padding:10px 12px; border:1px solid #26293a; background:#191a26; color:var(--ink);
+      border-radius:10px; cursor:pointer; text-align:left; display:flex; justify-content:space-between; align-items:center;
+    }
+    .btn[aria-pressed="true"]{border-color:#2a3f77; background:#16203a}
+    .btn .tag{font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid #2b2f45; color:var(--mut)}
+    .btn.on .tag{border-color:#244b2f; color:#a7f3d0}
+    .btn.off .tag{border-color:#4b2323; color:#fecaca}
+    .row{display:flex; gap:8px; flex-wrap:wrap}
+    .chip{
+      padding:8px 10px; border:1px solid #26293a; background:#191a26; border-radius:999px; cursor:pointer;
+    }
+    .chip[aria-pressed="true"]{border-color:#2a3f77; background:#16203a}
+    .canvas-wrap{position:relative; display:flex; align-items:center; justify-content:center; background:#000}
+    canvas{display:block; margin:auto; background:#000}
+    footer{
+      position:fixed; inset:auto 0 0 280px; height:42px; display:flex; align-items:center; gap:12px;
+      padding:0 14px; background:linear-gradient(0deg,#0b0b10,rgba(11,11,16,.7)); z-index:10; border-top:1px solid #1f2230;
+      color:var(--mut); font-size:12px;
+    }
+    @media (max-width:900px){
+      main{grid-template-columns:1fr}
+      aside{position:fixed; inset:auto 0 0 0; height:auto; border-right:none; border-top:1px solid #1f2230; display:flex; gap:8px; overflow-x:auto}
+      footer{inset:auto 0 0 0}
+      .group{min-width:240px}
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Organs Overlay</h1>
+  <span class="hint">ml5 BodyPose + p5.js</span>
+  <span class="hint">Toggle visibility, mirror, and guides.</span>
+</header>
+
+<main>
+  <aside>
+    <div class="group">
+      <h2>Organs</h2>
+      <button class="btn on"  data-organ="lungs"      aria-pressed="true"><span>Lungs</span><span class="tag">shown</span></button>
+      <button class="btn on"  data-organ="heart"      aria-pressed="true"><span>Heart</span><span class="tag">shown</span></button>
+      <button class="btn on"  data-organ="liver"      aria-pressed="true"><span>Liver</span><span class="tag">shown</span></button>
+      <button class="btn on"  data-organ="stomach"    aria-pressed="true"><span>Stomach</span><span class="tag">shown</span></button>
+      <button class="btn on"  data-organ="intestines" aria-pressed="true"><span>Intestines</span><span class="tag">shown</span></button>
+    </div>
+    <div class="group">
+      <h2>View</h2>
+      <div class="row">
+        <button class="chip" id="mirrorBtn" aria-pressed="false">Mirror</button>
+        <button class="chip" id="axesBtn"   aria-pressed="false">Show axes</button>
+      </div>
+    </div>
+  </aside>
+
+  <section class="canvas-wrap">
+    <!-- p5 canvas injected here -->
+  </section>
+</main>
+
+<footer>
+  <span>Tip: stand straight for best alignment.</span>
+  <span>Use “Mirror” if your webcam flips horizontally.</span>
+</footer>
+
+<script>
+// ================== Rendering + Pose ==================
+const TAU = Math.PI * 2;
+let video, bodyPose, poses = [], ready = false;
+let filt = Object.create(null);
+
+// Visibility state
+const organsVisible = {
+  lungs:true, heart:true, liver:true, stomach:true, intestines:true
+};
+let MIRROR = false, SMOOTH = 0.6, SHOW_AXES = false;
+
+// ---- helpers
+const i32 = v => Math.max(0, (v|0));
+const vready = v => !!(v && v.elt && v.elt.readyState >= 2 && v.elt.srcObject && v.elt.srcObject.active);
+const mx = x => MIRROR ? (width - x) : x;
+
+function ema(name, x, y){
+  if(!Number.isFinite(x) || !Number.isFinite(y)) return filt[name]||null;
+  if(!filt[name]) { filt[name] = {x, y}; return {x,y}; }
+  filt[name].x = lerp(filt[name].x, x, SMOOTH);
+  filt[name].y = lerp(filt[name].y, y, SMOOTH);
+  return {x:filt[name].x, y:filt[name].y};
+}
+function kp(name){
+  const p = poses[0]; if(!p) return null;
+  const k = (p.keypoints||[]).find(e => e.name===name || e.part===name);
+  if(!k || !Number.isFinite(k.x) || !Number.isFinite(k.y)) return null;
+  return ema(name, mx(k.x), k.y);
+}
+function toWorld(F,u,v){ 
+  return { x: F.origin.x + u*F.xv.x + v*F.yv.x,
+           y: F.origin.y + u*F.xv.y + v*F.yv.y };
+}
+function label(pt, txt){
+  if(!pt) return;
+  push();
+  rectMode(CENTER); textAlign(CENTER, BOTTOM);
+  noStroke(); fill(0,170);
+  textSize(12);
+  const tw = i32(textWidth(txt)) + 10;
+  rect(i32(pt.x), i32(pt.y-14), tw, 18, 6);
+  fill(255); text(txt, i32(pt.x), i32(pt.y-14));
+  pop();
+}
+
+function torsoFrame(){
+  const LSh=kp('left_shoulder'), RSh=kp('right_shoulder');
+  const LHp=kp('left_hip'),      RHp=kp('right_hip');
+  if(!(LSh&&RSh&&LHp&&RHp)) return null;
+
+  const sMid = ema('sMid', (LSh.x+RSh.x)/2, (LSh.y+RSh.y)/2);
+  const hMid = ema('hMid', (LHp.x+RHp.x)/2, (LHp.y+RHp.y)/2);
+  if(!(sMid&&hMid)) return null;
+
+  const yvRaw = {x:hMid.x - sMid.x, y:hMid.y - sMid.y};
+  const yvLen = Math.hypot(yvRaw.x, yvRaw.y);
+  if (!(yvLen>0)) return null;
+  const yv = {x: yvRaw.x / yvLen, y: yvRaw.y / yvLen};
+  const xv = {x: -yv.y, y: yv.x};
+
+  const torsoH = yvLen;
+  const torsoW = Math.hypot(RSh.x - LSh.x, RSh.y - LSh.y);
+  const pelvisW = Math.hypot(RHp.x - LHp.x, RHp.y - LHp.y);
+  if (!(Number.isFinite(torsoH) && Number.isFinite(torsoW) && torsoH>0 && torsoW>0)) return null;
+
+  return {origin:sMid, xv, yv, torsoH, torsoW, pelvisW, sMid, hMid, LSh, RSh, LHp, RHp};
+}
+
+// Shapes
+function lungPath(side, w, h){
+  const s = side;
+  return {
+    top:  {u: s*0.10*w, v: 0},
+    bot:  {u: s*0.22*w, v: h},
+    c1:{u: s*0.55*w, v: h*0.15},
+    c2:{u: s*0.60*w, v: h*0.55},
+    c3:{u: s*0.05*w, v: h*0.95},
+    c4:{u: s*(-0.15*w), v: h*0.40}
+  };
+}
+function heartPoly(w,h){
+  return [
+    {u:-0.10*w, v:0.08*h},
+    {u:-0.22*w, v:0.00*h},
+    {u:-0.20*w, v:0.18*h},
+    {u: 0.00*w, v:0.32*h},
+    {u: 0.20*w, v:0.18*h},
+    {u: 0.22*w, v:0.00*h},
+    {u: 0.10*w, v:0.08*h},
+  ];
+}
+function liverPath(w,h){
+  return [
+    {u: 0.00*w, v: 0.00*h},
+    {u: 0.55*w, v: 0.06*h},
+    {u: 0.60*w, v: 0.20*h},
+    {u: 0.10*w, v: 0.25*h},
+    {u:-0.05*w, v: 0.18*h},
+  ];
+}
+function stomachPath(w,h){
+  return [
+    {u:-0.35*w, v: 0.05*h},
+    {u:-0.05*w, v: 0.00*h},
+    {u: 0.10*w, v: 0.15*h},
+    {u:-0.02*w, v: 0.30*h},
+    {u:-0.32*w, v: 0.24*h},
+  ];
+}
+
+// p5
+async function setup(){
+  const w=640,h=480;
+  const holder = document.querySelector('.canvas-wrap');
+  const c = createCanvas(w,h);
+  pixelDensity(1);
+  c.parent(holder);
+
+  video = createCapture({ video:{ width:w, height:h, facingMode:"user" }, audio:false });
+  video.size(w,h); video.hide();
+  await new Promise(res => video.elt.onloadeddata = () => res());
+  try { await video.elt.play(); } catch(_) {}
+
+  bodyPose = await ml5.bodyPose(video);
+  const spin = () => {
+    const okStream = vready(video);
+    const okDet = !!(bodyPose && (bodyPose.detector || bodyPose.poseDetector || bodyPose.model));
+    if (!okStream || !okDet) return setTimeout(spin, 120);
+    try {
+      bodyPose.detectStart(video, (r) => { poses = r||[]; ready = true; });
+    } catch { setTimeout(spin, 150); }
+  };
+  spin();
+
+  textFont('sans-serif');
+}
+
+function drawRibcage(F, theta){
+  const chestTop = 0.08*F.torsoH, chestBot = 0.45*F.torsoH;
+  const chestH = chestBot - chestTop;
+  const chestW = constrain(0.80*F.torsoW, 0.5*F.pelvisW, 1.3*F.torsoW);
+  if(!(Number.isFinite(chestH)&&Number.isFinite(chestW)&&chestH>0&&chestW>0)) return;
+  const c = toWorld(F, 0, (chestTop+chestBot)/2);
+  push(); translate(c.x, c.y); rotate(theta);
+  noFill(); stroke(255,70); strokeWeight(2);
+  ellipse(0,0, i32(chestW), i32(chestH));
+  line(0, -chestH*0.42, 0, chestH*0.42);
+  pop();
+}
+
+function draw(){
+  background(0);
+
+  if (!vready(video)) {
+    noStroke(); fill(255); textSize(12);
+    textAlign(LEFT,TOP); text("Waiting for camera…", 12, 12);
+    return;
+  }
+
+  if (MIRROR) { push(); translate(width,0); scale(-1,1); image(video,0,0,i32(width),i32(height)); pop(); }
+  else { image(video,0,0,i32(width),i32(height)); }
+
+  if(!ready || poses.length===0) {
+    noStroke(); fill(0,170); rect(8,8,220,32,8);
+    fill(255); textSize(12); textAlign(LEFT,TOP);
+    text("Loading BodyPose…", 16,16);
+    return;
+  }
+
+  const F = torsoFrame();
+  if(!F) return;
+  const theta = Math.atan2(F.yv.y, F.yv.x) - Math.PI/2;
+
+  if(SHOW_AXES){
+    strokeWeight(2);
+    stroke(0,255,0); line(F.origin.x, F.origin.y, F.origin.x + F.yv.x*80, F.origin.y + F.yv.y*80);
+    stroke(0,150,255); line(F.origin.x, F.origin.y, F.origin.x + F.xv.x*80, F.origin.y + F.xv.y*80);
+  }
+
+  drawRibcage(F, theta);
+
+  const chestTop = 0.10*F.torsoH, chestBot = 0.42*F.torsoH;
+  const uAbdTop  = chestBot,       uAbdBot = 0.68*F.torsoH;
+  const lAbdTop  = uAbdBot,        lAbdBot = 0.92*F.torsoH;
+
+  const chestW = constrain(0.82*F.torsoW, 0.5*F.pelvisW, 1.35*F.torsoW);
+  const abdW   = constrain(0.90*F.torsoW, 0.6*F.pelvisW, 1.45*F.torsoW);
+
+  // Lungs
+  if (organsVisible.lungs){
+    const lungH = chestBot - chestTop, lungW = chestW*0.48;
+    if(Number.isFinite(lungH+lungW) && lungH>0 && lungW>0){
+      const base = toWorld(F, 0, chestTop);
+      function drawLung(side){
+        const p = lungPath(side, lungW, lungH);
+        push(); translate(base.x, base.y); rotate(theta);
+        noStroke(); fill(135,206,250,110);
+        beginShape();
+        vertex(p.top.u, p.top.v);
+        bezierVertex(p.c1.u,p.c1.v, p.c2.u,p.c2.v, p.bot.u,p.bot.v);
+        bezierVertex(p.c3.u,p.c3.v, p.c4.u,p.c4.v, p.top.u,p.top.v);
+        endShape(CLOSE);
+        pop();
+        label(toWorld(F, side*lungW*0.18, chestTop + lungH*0.40), side<0?"Left lung":"Right lung");
+      }
+      drawLung(-1); drawLung(+1);
+    }
+  }
+
+  // Heart
+  if (organsVisible.heart){
+    const heartU=-0.10*F.torsoW, heartV=lerp(chestTop, chestBot, 0.58);
+    const heartW=0.26*F.torsoW*(1+0.03*Math.sin(frameCount*0.08));
+    const heartH=0.22*F.torsoH*(1+0.03*Math.sin(frameCount*0.08));
+    if(Number.isFinite(heartW+heartH) && heartW>0 && heartH>0){
+      const pts=heartPoly(heartW,heartH), base=toWorld(F,heartU,heartV);
+      push(); translate(base.x, base.y); rotate(theta+0.05);
+      noStroke(); fill(220,20,60,170);
+      beginShape(); pts.forEach(q=>vertex(q.u,q.v)); endShape(CLOSE);
+      pop(); label(base, "Heart");
+    }
+  }
+
+  // Liver
+  if (organsVisible.liver){
+    const livU=0.18*F.torsoW, livV=lerp(uAbdTop,uAbdBot,0.28);
+    const livW=0.58*F.torsoW, livH=0.26*F.torsoH;
+    if(Number.isFinite(livW+livH) && livW>0 && livH>0){
+      const pts=liverPath(livW,livH), base=toWorld(F,livU,livV);
+      push(); translate(base.x, base.y); rotate(theta);
+      noStroke(); fill(210,105,30,110);
+      beginShape(); pts.forEach(q=>vertex(q.u,q.v)); endShape(CLOSE);
+      pop(); label(toWorld(F, livU+livW*0.20, livV), "Liver");
+    }
+  }
+
+  // Stomach
+  if (organsVisible.stomach){
+    const stoU=-0.18*F.torsoW, stoV=lerp(uAbdTop,uAbdBot,0.40);
+    const stoW=0.44*F.torsoW,  stoH=0.22*F.torsoH;
+    if(Number.isFinite(stoW+stoH) && stoW>0 && stoH>0){
+      const pts=stomachPath(stoW,stoH), base=toWorld(F,stoU,stoV);
+      push(); translate(base.x, base.y); rotate(theta-0.10);
+      noStroke(); fill(255,165,0,120);
+      beginShape(); pts.forEach(q=>vertex(q.u,q.v)); endShape(CLOSE);
+      pop();
+      label(toWorld(F, stoU-0.02*F.torsoW, stoV+0.02*F.torsoH), "Stomach");
+    }
+  }
+
+  // Intestines
+  if (organsVisible.intestines){
+    const intTop=lAbdTop+0.02*F.torsoH, intBot=lAbdBot-0.04*F.torsoH;
+    const intH=Math.max(0,intBot-intTop), intW=abdW*0.92;
+    if(Number.isFinite(intH+intW) && intH>4 && intW>8){
+      const base=toWorld(F,0,intTop);
+      push(); translate(base.x, base.y); rotate(theta);
+      noStroke(); fill(154,205,50,110);
+      const ctx=drawingContext;
+      const w = i32(intW), h = i32(intH);
+      if (w>8 && h>4) {
+        const r = Math.min(14, Math.floor(Math.min(w,h)/4));
+        ctx.beginPath();
+        const x0=-w/2, y0=0, x1=w/2, y1=h;
+        ctx.moveTo(x0+r,y0); ctx.lineTo(x1-r,y0); ctx.quadraticCurveTo(x1,y0,x1,y0+r);
+        ctx.lineTo(x1,y1-r); ctx.quadraticCurveTo(x1,y1,x1-r,y1);
+        ctx.lineTo(x0+r,y1); ctx.quadraticCurveTo(x0,y1,x0,y1-r);
+        ctx.lineTo(x0,y0+r); ctx.quadraticCurveTo(x0,y0,x0+r,y0);
+        ctx.closePath(); ctx.fill();
+      }
+      stroke(90,140,30,160); noFill(); strokeWeight(2);
+      const lanes=4, padU=10, padV=8;
+      for(let i=0;i<lanes;i++){
+        const y=map(i,0,lanes-1,padV,h-padV);
+        beginShape();
+        for(let t=0;t<=100;t++){
+          const s=Math.sin((t/100)*3*TAU);
+          const uu=map(s,-1,1,padU,w-padU)-w/2;
+          vertex(uu,y);
+        }
+        endShape();
+      }
+      pop();
+      label(toWorld(F,0,intTop+intH*0.5),"Intestines");
+    }
+  }
+
+  // Guides
+  stroke(255,180); strokeWeight(2);
+  line(F.LSh.x, F.LSh.y, F.RSh.x, F.RSh.y);
+  line(F.LHp.x, F.LHp.y, F.RHp.x, F.RHp.y);
+  line(F.sMid.x, F.sMid.y, F.hMid.x, F.hMid.y);
+}
+
+// ================== UI Wiring ==================
+function setBtnVisual(btn, on){
+  btn.classList.toggle('on', on);
+  btn.classList.toggle('off', !on);
+  btn.setAttribute('aria-pressed', String(on));
+  const tag = btn.querySelector('.tag');
+  if (tag) { tag.textContent = on ? 'shown' : 'hidden'; }
+}
+document.querySelectorAll('.btn[data-organ]').forEach(btn=>{
+  const key = btn.getAttribute('data-organ');
+  setBtnVisual(btn, organsVisible[key]);
+  btn.addEventListener('click', ()=>{
+    organsVisible[key] = !organsVisible[key];
+    setBtnVisual(btn, organsVisible[key]);
+  });
+});
+
+const mirrorBtn = document.getElementById('mirrorBtn');
+mirrorBtn.addEventListener('click', ()=>{
+  MIRROR = !MIRROR;
+  mirrorBtn.setAttribute('aria-pressed', String(MIRROR));
+});
+
+const axesBtn = document.getElementById('axesBtn');
+axesBtn.addEventListener('click', ()=>{
+  SHOW_AXES = !SHOW_AXES;
+  axesBtn.setAttribute('aria-pressed', String(SHOW_AXES));
+});
+</script>
+</body>
+</html>
